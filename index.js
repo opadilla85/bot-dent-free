@@ -140,22 +140,21 @@ app.post('/api/chat', async (req, res) => {
     const apiKey = await getGeminiApiKey();
     const ai = new GoogleGenAI({ apiKey });
     
-    // Mapeamos el historial del frontend al formato oficial del SDK de Gemini
+    // CORRECCIÓN: Limpieza de historial para evitar partes de texto 'undefined'
     const contents = history.map(msg => ({
       role: msg.role === 'model' ? 'model' : 'user',
-      parts: [{ text: msg.text }]
+      parts: [{ text: msg.text || "" }]
     }));
 
-    // Agregamos el mensaje actual del usuario
-    contents.push({ role: 'user', parts: [{ text: message }] });
+    contents.push({ role: 'user', parts: [{ text: message || "" }] });
 
     const requestConfig = {
       model: 'gemini-3-flash-preview',
       contents,
       config: {
         systemInstruction: `Eres "Luz", asistente dental de la Dra. Osmara. 
-        - Mantén el contexto: Si el usuario ya te dio su nombre o fecha, no la pidas de nuevo.
-        - Usa 'verificarDisponibilidad' antes de agendar.
+        - REGLA DE ORO: Si el usuario te da datos, úsalos. No preguntes lo mismo dos veces.
+        - Para citas: Verifica disponibilidad -> Confirma datos -> Agenda.
         - Hoy es ${new Date().toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}.`,
         tools
       }
@@ -166,39 +165,54 @@ app.post('/api/chat', async (req, res) => {
     let parts = candidate.content.parts;
     let functionCalls = parts.filter(p => p.functionCall);
 
-    // Manejo de llamadas a funciones (Herramientas)
     if (functionCalls.length > 0) {
       const toolResults = [];
       for (const fc of functionCalls) {
+        // CORRECCIÓN: Extraemos el ID del functionCall si existe
+        const callId = fc.functionCall.id;
+        
         if (fc.functionCall.name === 'verificarDisponibilidad') {
           const busy = await checkCollision(fc.functionCall.args.fecha, fc.functionCall.args.hora);
-          toolResults.push({ name: fc.functionCall.name, response: { status: busy ? 'OCUPADO' : 'DISPONIBLE' } });
+          toolResults.push({ 
+            name: fc.functionCall.name, 
+            id: callId, 
+            response: { status: busy ? 'OCUPADO' : 'DISPONIBLE' } 
+          });
         }
         if (fc.functionCall.name === 'agendarCita') {
           const { nombre, fecha, hora, telefono } = fc.functionCall.args;
           const event = await addEvent(nombre, fecha, hora, telefono);
-          toolResults.push({ name: fc.functionCall.name, response: { success: true, eventId: event.id } });
+          toolResults.push({ 
+            name: fc.functionCall.name, 
+            id: callId, 
+            response: { success: true, eventId: event.id } 
+          });
         }
       }
 
-      // Enviamos resultados de las herramientas de vuelta a Gemini para respuesta final
+      // CORRECCIÓN: La respuesta de la herramienta debe usar el formato exacto del SDK
       const secondResponse = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: [
           ...contents,
           { role: 'model', parts: parts },
-          { role: 'user', parts: toolResults.map(tr => ({ functionResponse: tr })) }
+          { role: 'user', parts: toolResults.map(tr => ({ 
+            functionResponse: {
+              name: tr.name,
+              id: tr.id, // Fundamental para Gemini 3
+              response: tr.response
+            }
+          })) }
         ]
       });
-      return res.json({ text: secondResponse.text });
+      return res.json({ text: secondResponse.text || "Operación completada con éxito." });
     }
 
-    // Si no hubo herramientas, respondemos directamente con el texto generado
-    res.json({ text: response.text });
+    res.json({ text: response.text || "" });
     
   } catch (error) {
     console.error("[Chat API Error]:", error);
-    res.status(500).json({ error: "Error de orquestación en el asistente" });
+    res.status(500).json({ error: "Error en el asistente. Por favor, intenta de nuevo." });
   }
 });
 

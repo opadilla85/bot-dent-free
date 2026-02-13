@@ -57,6 +57,7 @@ function getISOTimeRange(fecha, hora) {
 
 async function checkCollision(fecha, hora) {
   const { start, end } = getISOTimeRange(fecha, hora);
+  console.log(`[Calendar Debug] Verificando colisión en: ${CALENDAR_ID} para ${start}`);
   const response = await calendar.events.list({
     calendarId: CALENDAR_ID,
     timeMin: start,
@@ -74,8 +75,16 @@ async function addEvent(nombre, fecha, hora, telefono) {
     start: { dateTime: start, timeZone: 'America/Mexico_City' },
     end: { dateTime: end, timeZone: 'America/Mexico_City' },
   };
-  const res = await calendar.events.insert({ calendarId: CALENDAR_ID, resource: event });
-  return res.data;
+  
+  console.log(`[Calendar Debug] Intentando insertar evento en CALENDAR_ID: ${CALENDAR_ID}`);
+  try {
+    const res = await calendar.events.insert({ calendarId: CALENDAR_ID, resource: event });
+    console.log(`[Calendar Debug] EVENTO CREADO EXITOSAMENTE. Link: ${res.data.htmlLink}`);
+    return res.data;
+  } catch (error) {
+    console.error(`[Calendar Debug] Error FATAL al insertar:`, error.response?.data || error.message);
+    throw error;
+  }
 }
 
 // --- Endpoints ---
@@ -140,7 +149,6 @@ app.post('/api/chat', async (req, res) => {
     const apiKey = await getGeminiApiKey();
     const ai = new GoogleGenAI({ apiKey });
     
-    // CORRECCIÓN: Limpieza de historial para evitar partes de texto 'undefined'
     const contents = history.map(msg => ({
       role: msg.role === 'model' ? 'model' : 'user',
       parts: [{ text: msg.text || "" }]
@@ -168,7 +176,6 @@ app.post('/api/chat', async (req, res) => {
     if (functionCalls.length > 0) {
       const toolResults = [];
       for (const fc of functionCalls) {
-        // CORRECCIÓN: Extraemos el ID del functionCall si existe
         const callId = fc.functionCall.id;
         
         if (fc.functionCall.name === 'verificarDisponibilidad') {
@@ -190,7 +197,6 @@ app.post('/api/chat', async (req, res) => {
         }
       }
 
-      // CORRECCIÓN: La respuesta de la herramienta debe usar el formato exacto del SDK
       const secondResponse = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: [
@@ -199,7 +205,7 @@ app.post('/api/chat', async (req, res) => {
           { role: 'user', parts: toolResults.map(tr => ({ 
             functionResponse: {
               name: tr.name,
-              id: tr.id, // Fundamental para Gemini 3
+              id: tr.id,
               response: tr.response
             }
           })) }

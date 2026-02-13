@@ -1,4 +1,3 @@
-
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -10,46 +9,27 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
 
-// Clientes de Google Cloud
 const secretClient = new SecretManagerServiceClient();
 
-// Configuración de Entorno
 const CALENDAR_ID = process.env.CALENDAR_ID;
 const GOOGLE_CREDENTIALS_ENV = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 const PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.PROJECT_ID;
 
-// Cache de Secretos
 let cachedGeminiKey = null;
 
-/**
- * Recupera la API Key de Gemini desde Google Cloud Secret Manager
- */
 async function getGeminiApiKey() {
   if (cachedGeminiKey) return cachedGeminiKey;
-
-  if (!PROJECT_ID) {
-    console.warn("[Secret Manager] Advertencia: GOOGLE_CLOUD_PROJECT no definido. Intentando fallback...");
-  }
-
   try {
     const name = `projects/${PROJECT_ID}/secrets/GEMINI_API_KEY/versions/latest`;
-    console.log(`[Secret Manager] Accediendo a: ${name}`);
-    
     const [version] = await secretClient.accessSecretVersion({ name });
-    const payload = version.payload.data.toString();
-    
-    cachedGeminiKey = payload;
-    return payload;
+    cachedGeminiKey = version.payload.data.toString();
+    return cachedGeminiKey;
   } catch (error) {
-    console.error("[Secret Manager Error] No se pudo recuperar GEMINI_API_KEY:", error.message);
-    // Si falla el secreto, intentamos usar la env var como último recurso
+    console.error("[Secret Manager Error]:", error.message);
     return process.env.API_KEY; 
   }
 }
 
-/**
- * Configuración de Google Calendar Auth
- */
 let googleAuthOptions = {
   scopes: ['https://www.googleapis.com/auth/calendar'],
 };
@@ -61,45 +41,71 @@ try {
     googleAuthOptions.keyFile = GOOGLE_CREDENTIALS_ENV;
   }
 } catch (e) {
-  console.error("[Auth Error] Fallo al procesar credenciales de Calendar:", e.message);
+  console.error("[Auth Error]:", e.message);
 }
 
 const auth = new google.auth.GoogleAuth(googleAuthOptions);
 const calendar = google.calendar({ version: 'v3', auth });
 
-// Utilidades de tiempo
+// --- Lógica de Negocio Centralizada ---
+
 function getISOTimeRange(fecha, hora) {
+  // Aseguramos formato ISO y zona horaria de CDMX
   const start = new Date(`${fecha}T${hora}:00-06:00`);
-  const end = new Date(start.getTime() + 60 * 60 * 1000);
+  const end = new Date(start.getTime() + 60 * 60 * 1000); // 1 hora de duración predeterminada
   return { start: start.toISOString(), end: end.toISOString() };
 }
 
 async function checkCollision(fecha, hora) {
   const { start, end } = getISOTimeRange(fecha, hora);
-  try {
-    const response = await calendar.events.list({
-      calendarId: CALENDAR_ID,
-      timeMin: start,
-      timeMax: end,
-      singleEvents: true,
-    });
-    return (response.data.items || []).length > 0;
-  } catch (error) {
-    throw new Error("Error de calendario: " + error.message);
-  }
+  const response = await calendar.events.list({
+    calendarId: CALENDAR_ID,
+    timeMin: start,
+    timeMax: end,
+    singleEvents: true,
+  });
+  return (response.data.items || []).length > 0;
 }
 
 async function addEvent(nombre, fecha, hora, telefono) {
   const { start, end } = getISOTimeRange(fecha, hora);
   const event = {
     summary: `Cita Dental: ${nombre}`,
-    description: `Paciente: ${nombre}\nTel: ${telefono}`,
+    description: `Paciente: ${nombre}\nTeléfono: ${telefono}\nAgendado vía Luz (Asistente IA)`,
     start: { dateTime: start, timeZone: 'America/Mexico_City' },
     end: { dateTime: end, timeZone: 'America/Mexico_City' },
+    reminders: { useDefault: true }
   };
   const res = await calendar.events.insert({ calendarId: CALENDAR_ID, resource: event });
   return res.data;
 }
+
+// --- Endpoints para el CalendarService del Frontend ---
+
+app.get('/api/calendar/availability', async (req, res) => {
+  const { fecha, hora } = req.query;
+  try {
+    const busy = await checkCollision(fecha, hora);
+    res.json({ busy });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/calendar/appointments', async (req, res) => {
+  const { patientName, date, time, phone } = req.body;
+  try {
+    const isBusy = await checkCollision(date, time);
+    if (isBusy) return res.status(409).json({ error: "Horario ya ocupado" });
+    
+    const event = await addEvent(patientName, date, time, phone);
+    res.json({ id: event.id, status: 'confirmed', ...req.body });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Orquestador de Chat con Herramientas ---
 
 const tools = [{
   functionDeclarations: [
@@ -108,8 +114,8 @@ const tools = [{
       parameters: {
         type: Type.OBJECT,
         properties: {
-          fecha: { type: Type.STRING },
-          hora: { type: Type.STRING }
+          fecha: { type: Type.STRING, description: 'YYYY-MM-DD' },
+          hora: { type: Type.STRING, description: 'HH:MM' }
         },
         required: ['fecha', 'hora']
       }
@@ -130,36 +136,31 @@ const tools = [{
   ]
 }];
 
-// Endpoint de Chat
 app.post('/api/chat', async (req, res) => {
   const { message, history = [] } = req.body;
-
   try {
-    // Obtener la llave desde Secret Manager antes de cada interacción (con cache)
     const apiKey = await getGeminiApiKey();
-    if (!apiKey) throw new Error("API Key no disponible en Secret Manager");
-
     const ai = new GoogleGenAI({ apiKey });
-
+    
     const response = await ai.models.generateContent({
-      model: 'gemini-flash-lite-latest',
+      model: 'gemini-3-flash-preview',
       contents: [...history, { role: 'user', parts: [{ text: message }] }],
       config: {
-        systemInstruction: `Eres "Luz", asistente de la Dra. Osmara. Verifica disponibilidad antes de agendar. Horario L-V 9-18h.`,
+        systemInstruction: `Eres "Luz", la asistente de la Dra. Osmara. Tu prioridad es agendar citas verificando disponibilidad. Hoy es ${new Date().toLocaleDateString('es-MX')}.`,
         tools
       }
     });
 
     const candidate = response.candidates?.[0];
-    let functionCalls = candidate?.content?.parts?.filter(p => p.functionCall);
-    let finalResponseText = response.text;
+    let parts = candidate.content.parts;
+    let functionCalls = parts.filter(p => p.functionCall);
 
-    if (functionCalls && functionCalls.length > 0) {
+    if (functionCalls.length > 0) {
       const toolResults = [];
       for (const fc of functionCalls) {
         if (fc.functionCall.name === 'verificarDisponibilidad') {
-          const isOccupied = await checkCollision(fc.functionCall.args.fecha, fc.functionCall.args.hora);
-          toolResults.push({ name: fc.functionCall.name, response: { status: isOccupied ? 'OCUPADO' : 'DISPONIBLE' } });
+          const busy = await checkCollision(fc.functionCall.args.fecha, fc.functionCall.args.hora);
+          toolResults.push({ name: fc.functionCall.name, response: { status: busy ? 'OCUPADO' : 'DISPONIBLE' } });
         }
         if (fc.functionCall.name === 'agendarCita') {
           const { nombre, fecha, hora, telefono } = fc.functionCall.args;
@@ -169,21 +170,21 @@ app.post('/api/chat', async (req, res) => {
       }
 
       const secondResponse = await ai.models.generateContent({
-        model: 'gemini-flash-lite-latest',
+        model: 'gemini-3-flash-preview',
         contents: [
           ...history,
           { role: 'user', parts: [{ text: message }] },
-          { role: 'model', parts: candidate.content.parts },
+          { role: 'model', parts: parts },
           { role: 'user', parts: toolResults.map(tr => ({ functionResponse: tr })) }
         ]
       });
-      finalResponseText = secondResponse.text;
+      return res.json({ text: secondResponse.text });
     }
 
-    res.json({ text: finalResponseText });
+    res.json({ text: response.text });
   } catch (error) {
     console.error("[Chat Error]:", error);
-    res.status(500).json({ error: "Error en el servicio", details: error.message });
+    res.status(500).json({ error: "Error en el asistente" });
   }
 });
 
@@ -191,4 +192,4 @@ app.use(express.static(path.join(__dirname, 'dist')));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Servidor iniciado en puerto ${PORT}. Proyecto Cloud: ${PROJECT_ID}`));
+app.listen(PORT, () => console.log(`Backend Dra. Osmara activo en puerto ${PORT}`));

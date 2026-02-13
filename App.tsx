@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   Send, Stethoscope, Clock, MapPin, Phone, MessageSquare, 
@@ -13,6 +12,7 @@ const App: React.FC = () => {
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // Inicializamos con el mensaje de bienvenida de Luz
     setMessages([{ role: 'model', text: '¡Hola! Soy Luz, asistente de la Dra. Osmara. ¿Cómo podemos ayudarte hoy con tu sonrisa?' }]);
   }, []);
 
@@ -22,21 +22,32 @@ const App: React.FC = () => {
 
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
+    
     const userText = input.trim();
+    const currentMessages = [...messages, { role: 'user', text: userText }];
+    
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', text: userText }]);
+    setMessages(currentMessages);
     setIsLoading(true);
 
     try {
+      // Enviamos tanto el mensaje actual como el historial acumulado
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userText })
+        body: JSON.stringify({ 
+          message: userText,
+          history: messages // El backend recibirá los mensajes previos para el contexto
+        })
       });
+
+      if (!response.ok) throw new Error('Error en la respuesta del servidor');
+      
       const data = await response.json();
       setMessages(prev => [...prev, { role: 'model', text: data.text }]);
     } catch (error) {
-      setMessages(prev => [...prev, { role: 'model', text: 'Error de conexión con la clínica. Intente más tarde.' }]);
+      console.error("Chat error:", error);
+      setMessages(prev => [...prev, { role: 'model', text: 'Lo siento, tuve un problema de conexión. ¿Podrías repetir eso?' }]);
     } finally {
       setIsLoading(false);
     }
@@ -78,12 +89,19 @@ const App: React.FC = () => {
           <div className="max-w-3xl mx-auto space-y-6">
             {messages.map((m, i) => (
               <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`p-4 rounded-2xl max-w-[85%] text-sm ${m.role === 'user' ? 'bg-emerald-600 text-white' : 'bg-white border shadow-sm text-slate-700'}`}>
+                <div className={`p-4 rounded-2xl max-w-[85%] text-sm shadow-sm ${m.role === 'user' ? 'bg-emerald-600 text-white' : 'bg-white border text-slate-700'}`}>
                   {m.text}
                 </div>
               </div>
             ))}
-            {isLoading && <div className="text-xs text-slate-400 animate-pulse">Luz está pensando...</div>}
+            {isLoading && (
+              <div className="flex justify-start">
+                <div className="bg-white border p-4 rounded-2xl shadow-sm italic text-xs text-slate-400 flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce"></div>
+                  Luz está escribiendo...
+                </div>
+              </div>
+            )}
             <div ref={chatEndRef} />
           </div>
         </div>
@@ -91,12 +109,19 @@ const App: React.FC = () => {
         <div className="p-4 border-t bg-white">
           <div className="max-w-3xl mx-auto flex gap-2">
             <input 
-              className="flex-1 bg-slate-100 border-none rounded-xl px-5 py-3 text-sm focus:ring-2 focus:ring-emerald-500"
+              className="flex-1 bg-slate-100 border-none rounded-xl px-5 py-3 text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
               value={input} onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleSend()}
-              placeholder="Escribe tu mensaje..."
+              placeholder="Escribe tu mensaje (ej: Quiero una cita para mañana)"
+              disabled={isLoading}
             />
-            <button onClick={handleSend} className="bg-emerald-600 text-white p-3 rounded-xl hover:bg-emerald-700"><Send size={20} /></button>
+            <button 
+              onClick={handleSend} 
+              disabled={isLoading || !input.trim()}
+              className={`p-3 rounded-xl transition-colors ${isLoading || !input.trim() ? 'bg-slate-200 text-slate-400' : 'bg-emerald-600 text-white hover:bg-emerald-700'}`}
+            >
+              <Send size={20} />
+            </button>
           </div>
         </div>
       </main>

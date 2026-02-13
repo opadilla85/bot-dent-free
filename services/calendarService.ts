@@ -1,46 +1,56 @@
-
 import { Appointment } from '../types';
 
 /**
- * CalendarService: Actúa como puente hacia la API de Google Calendar.
- * En un despliegue real en Cloud Run, este servicio consultaría al backend de Node.js.
+ * CalendarService: Conecta el frontend con la API de Google Calendar a través de nuestro backend.
  */
 class CalendarService {
-  // En producción, este endpoint sería la URL de tu servicio en Cloud Run
   private API_BASE = '/api/calendar'; 
 
   async checkCollision(date: string, time: string): Promise<boolean> {
-    console.log(`[Cerebro IA] Verificando disponibilidad para: ${date} ${time}`);
-    
-    // Simulación de latencia de red real
-    await new Promise(resolve => setTimeout(resolve, 800));
-    
-    // Aquí implementamos la lógica de verificación real que consultaría el backend
-    // Por ahora, simulamos una colisión simple para demostrar la capacidad de razonamiento del LLM
-    const mockOccupied = ["2024-05-20T10:00", "2024-05-21T15:30"];
-    return mockOccupied.includes(`${date}T${time}`);
+    try {
+      const params = new URLSearchParams({ fecha: date, hora: time });
+      const response = await fetch(`${this.API_BASE}/availability?${params}`);
+      
+      if (!response.ok) throw new Error('Error al consultar disponibilidad');
+      
+      const data = await response.json();
+      return data.busy; // El backend responde { busy: true/false }
+    } catch (error) {
+      console.error("[CalendarService] Error:", error);
+      return true; // Por seguridad, si falla, asumimos ocupado
+    }
   }
 
   async addAppointment(appointment: Omit<Appointment, 'id' | 'status'>): Promise<Appointment> {
-    console.log(`[Cerebro IA] Ejecutando inserción en Google Calendar para: ${appointment.patientName}`);
-    
-    // En un entorno real, aquí se haría un fetch POST al backend
-    // const response = await fetch(this.API_BASE, { method: 'POST', body: JSON.stringify(appointment) });
-    // return await response.json();
+    try {
+      const response = await fetch(`${this.API_BASE}/appointments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(appointment)
+      });
 
-    await new Promise(resolve => setTimeout(resolve, 1200));
-    
-    return {
-      ...appointment,
-      id: `gc-${Math.random().toString(36).substr(2, 9)}`,
-      status: 'confirmed'
-    };
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.details || 'Error al agendar cita');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error("[CalendarService] Error al insertar:", error);
+      throw error;
+    }
   }
 
   async removeAppointment(id: string): Promise<boolean> {
-    console.log(`[Cerebro IA] Solicitando eliminación de evento: ${id}`);
-    await new Promise(resolve => setTimeout(resolve, 500));
-    return true;
+    try {
+      const response = await fetch(`${this.API_BASE}/appointments/${id}`, {
+        method: 'DELETE'
+      });
+      return response.ok;
+    } catch (error) {
+      console.error("[CalendarService] Error al eliminar:", error);
+      return false;
+    }
   }
 }
 

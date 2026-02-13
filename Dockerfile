@@ -2,7 +2,7 @@
 FROM node:20-slim
 
 WORKDIR /app
-RUN npm install -g npm@11.9.0
+RUN npm install -g npm@11.10.0
 COPY package*.json ./
 RUN npm install
 

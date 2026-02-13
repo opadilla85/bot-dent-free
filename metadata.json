@@ -1,0 +1,7 @@
+{
+  "name": "Asistente Dental Dra. Osmara",
+  "description": "Un agente inteligente de orquestación para la clínica dental de la Dra. Osmara Campos, gestionando citas y disponibilidad en tiempo real.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

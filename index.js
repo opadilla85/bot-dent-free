@@ -64,7 +64,9 @@ async function checkCollision(fecha, hora) {
     timeMax: end,
     singleEvents: true,
   });
-  return (response.data.items || []).length > 0;
+  const items = response.data.items || [];
+  console.log(`[Calendar Debug] Colisiones encontradas: ${items.length}`);
+  return items.length > 0;
 }
 
 async function addEvent(nombre, fecha, hora, telefono) {
@@ -149,72 +151,81 @@ app.post('/api/chat', async (req, res) => {
     const apiKey = await getGeminiApiKey();
     const ai = new GoogleGenAI({ apiKey });
     
-    const contents = history.map(msg => ({
+    // Preparar historial base
+    let contents = history.map(msg => ({
       role: msg.role === 'model' ? 'model' : 'user',
       parts: [{ text: msg.text || "" }]
     }));
 
     contents.push({ role: 'user', parts: [{ text: message || "" }] });
 
-    const requestConfig = {
-      model: 'gemini-3-flash-preview',
-      contents,
-      config: {
-        systemInstruction: `Eres "Luz", asistente dental de la Dra. Osmara. 
-        - REGLA DE ORO: Si el usuario te da datos, úsalos. No preguntes lo mismo dos veces.
-        - Para citas: Verifica disponibilidad -> Confirma datos -> Agenda.
-        - Hoy es ${new Date().toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}.`,
-        tools
-      }
+    const config = {
+      systemInstruction: `Eres "Luz", asistente dental de la Dra. Osmara. 
+      - REGLA DE ORO: Si el usuario te da datos, úsalos. No preguntes lo mismo dos veces.
+      - Para citas: Verifica disponibilidad -> Confirma -> Agenda.
+      - Hoy es ${new Date().toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}.`,
+      tools
     };
 
-    let response = await ai.models.generateContent(requestConfig);
-    let candidate = response.candidates?.[0];
-    let parts = candidate.content.parts;
-    let functionCalls = parts.filter(p => p.functionCall);
+    // BUCLE DE ORQUESTACIÓN: Permite múltiples llamadas a herramientas en un solo turno
+    let responseText = "";
+    let iteration = 0;
+    const MAX_ITERATIONS = 5;
 
-    if (functionCalls.length > 0) {
+    let currentResponse = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents,
+      config
+    });
+
+    while (iteration < MAX_ITERATIONS) {
+      let candidate = currentResponse.candidates?.[0];
+      let parts = candidate.content.parts;
+      let functionCalls = parts.filter(p => p.functionCall);
+
+      if (functionCalls.length === 0) {
+        responseText = currentResponse.text || "";
+        break;
+      }
+
+      // Procesar llamadas a funciones
       const toolResults = [];
       for (const fc of functionCalls) {
         const callId = fc.functionCall.id;
-        
-        if (fc.functionCall.name === 'verificarDisponibilidad') {
-          const busy = await checkCollision(fc.functionCall.args.fecha, fc.functionCall.args.hora);
-          toolResults.push({ 
-            name: fc.functionCall.name, 
-            id: callId, 
-            response: { status: busy ? 'OCUPADO' : 'DISPONIBLE' } 
-          });
-        }
-        if (fc.functionCall.name === 'agendarCita') {
-          const { nombre, fecha, hora, telefono } = fc.functionCall.args;
-          const event = await addEvent(nombre, fecha, hora, telefono);
-          toolResults.push({ 
-            name: fc.functionCall.name, 
-            id: callId, 
-            response: { success: true, eventId: event.id } 
-          });
+        const name = fc.functionCall.name;
+        const args = fc.functionCall.args;
+
+        console.log(`[Tool Call] Model solicita: ${name}`, args);
+
+        if (name === 'verificarDisponibilidad') {
+          const busy = await checkCollision(args.fecha, args.hora);
+          toolResults.push({ name, id: callId, response: { status: busy ? 'OCUPADO' : 'DISPONIBLE' } });
+        } else if (name === 'agendarCita') {
+          const event = await addEvent(args.nombre, args.fecha, args.hora, args.telefono);
+          toolResults.push({ name, id: callId, response: { success: true, eventId: event.id } });
         }
       }
 
-      const secondResponse = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: [
-          ...contents,
-          { role: 'model', parts: parts },
-          { role: 'user', parts: toolResults.map(tr => ({ 
-            functionResponse: {
-              name: tr.name,
-              id: tr.id,
-              response: tr.response
-            }
-          })) }
-        ]
+      // Actualizar historial con la respuesta del modelo y el resultado de las herramientas
+      contents.push({ role: 'model', parts: parts });
+      contents.push({ 
+        role: 'user', 
+        parts: toolResults.map(tr => ({ 
+          functionResponse: { name: tr.name, id: tr.id, response: tr.response } 
+        })) 
       });
-      return res.json({ text: secondResponse.text || "Operación completada con éxito." });
+
+      // Consultar de nuevo al modelo con los resultados
+      currentResponse = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents,
+        config
+      });
+
+      iteration++;
     }
 
-    res.json({ text: response.text || "" });
+    res.json({ text: responseText || "Hecho. ¿En qué más puedo ayudarte?" });
     
   } catch (error) {
     console.error("[Chat API Error]:", error);
